@@ -234,5 +234,842 @@
       </div>
     </footer>
     <script src="script.js"></script>
+    <script type='text/javascript'>
+/**
+* Salesforce Embedded Messaging - Improved Implementation
+* Fixes: Dynamic country settings, race conditions, performance optimizations
+*/
+// ======================== CONFIGURATION =========================
+const ESW_CONFIG = {
+  ORG_ID: '00DMA000003XnGM',
+  DEPLOYMENT_NAME: 'LPM_Leapmotor',
+  SITE_URL: 'https://leapmotor--dev01.sandbox.my.site.com/ESWLPMLeapmotor1760706603231',
+  SCRT2_URL: 'https://leapmotor--dev01.sandbox.my.salesforce-scrt.com',
+
+  COUNTRY_MAPPING: {
+    'it': { name: 'Italy', language: 'it', code: 'it' },
+    'es': { name: 'Spain', language: 'es', code: 'es' },
+    'fr': { name: 'France', language: 'fr', code: 'fr' },
+    'de': { name: 'Germany', language: 'de', code: 'de' },
+    'uk': { name: 'United Kingdom', language: 'en_US', code: 'uk' },
+    'us': { name: 'United States', language: 'en_US', code: 'us' },
+    'be-fr': { name: 'Belgium', language: 'fr', code: 'be' },
+    'be-nl': { name: 'Belgium', language: 'fr', code: 'be' },
+    'us': { name: 'United States', language: 'en_US', code: 'us' },
+    'en': { name: 'United States', language: 'en_US', code: 'en' }
+  },
+
+  DEFAULT_COUNTRY: 'en'
+};
+/**
+* Extract country code from URL pathname
+* @returns {string} Country code (defaults to 'en')
+*/
+function getCountryCodeFromPath() {
+  const pathParts = window.location.pathname
+    .split('/')
+    .filter(function(part) { return part.length > 0; });
+
+  return pathParts.length > 0 ? pathParts[0].toLowerCase() : ESW_CONFIG.DEFAULT_COUNTRY;
+}
+/**
+* Get country information based on country code
+* @param {string} countryCode - Two-letter country code
+* @returns {Object} Country information object
+*/
+function getCountryInfo(countryCode) {
+  return ESW_CONFIG.COUNTRY_MAPPING[countryCode] || ESW_CONFIG.COUNTRY_MAPPING[ESW_CONFIG.DEFAULT_COUNTRY];
+}
+/**
+* Initialize Embedded Messaging with dynamic country settings
+*/
+function initEmbeddedMessaging() {
+  try {
+    const countryCode = getCountryCodeFromPath();
+    const countryInfo = getCountryInfo(countryCode);
+
+    // Configure embedded service settings
+    embeddedservice_bootstrap.settings.shouldOpenLinksInSameTab = true;
+    embeddedservice_bootstrap.settings.language = countryInfo.language;
+
+    // Set up pre-chat fields with dynamic country info
+    window.addEventListener("onEmbeddedMessagingReady", function() {
+      embeddedservice_bootstrap.prechatAPI.setHiddenPrechatFields({
+        Country: countryInfo.name,
+        Language: countryInfo.language,
+        CountryCode: countryInfo.code
+      });
+    });
+
+    // Initialize the embedded service
+    embeddedservice_bootstrap.init(
+      ESW_CONFIG.ORG_ID,
+      ESW_CONFIG.DEPLOYMENT_NAME,
+      ESW_CONFIG.SITE_URL,
+      {
+        scrt2URL: ESW_CONFIG.SCRT2_URL
+      }
+    );
+  } catch (err) {
+    console.error('[ESW] Error loading Embedded Messaging:', err);
+  }
+}
+</script>
+<!-- ======================== ADVANCED CONTROL ======================== -->
+<script type='text/javascript'>
+(function () {
+  'use strict';
+
+  /* ====== Configuration ====== */
+  const CONFIG = {
+    NUDGE_DELAY_MS: 30000,
+    DESKTOP_MIN_WIDTH: 1025,
+    STATE_POLL_INTERVAL_MS: 1000,
+    MIN_CHAT_HEIGHT: 150,
+    MIN_CHAT_WIDTH: 200,
+    RETRY_DELAYS: [80, 220, 500]
+  };
+
+  const MESSAGES = {
+    es: {
+      first: '¡Habla conmigo!',
+      followup: '¡Sigue hablándome!'
+    },
+    it: {
+      first: 'Parlami!',
+      followup: 'Continua a parlarmi!'
+    },
+    fr: {
+      first: 'Parle-moi!',
+      followup: 'Continue de me parler!'
+    },
+    de: {
+      first: 'Sprich mit mir!',
+      followup: 'Sprich weiter mit mir!'
+    },
+    en: {
+      first: 'Talk to me!',
+      followup: 'Keep talking to me!'
+    }
+  };
+
+  /* ====== State ====== */
+  const state = {
+    chatEverOpened: false,
+    chatCurrentlyOpen: false,
+    nudgeElement: null,
+    nudgeBottomPosition: null,
+
+    timers: {
+      first: null,
+      followup: null
+    },
+
+    observers: {
+      launcher: null,
+      body: null,
+      fixedRoot: null,
+      statePoller: null
+    }
+  };
+
+  /* ====== Utility Functions ====== */
+  const isMobile = () => window.innerWidth < CONFIG.DESKTOP_MIN_WIDTH;
+
+  function getCountryCode() {
+    return getCountryCodeFromPath();
+  }
+
+  function getLocalizedMessages() {
+    const code = getCountryCode();
+    return MESSAGES[code] || MESSAGES.en;
+  }
+
+  function clearTimer(timerName) {
+    if (state.timers[timerName]) {
+      console.log(`[TIMER] Clearing ${timerName} timer`);
+      clearTimeout(state.timers[timerName]);
+      state.timers[timerName] = null;
+    }
+  }
+
+  function clearAllTimers() {
+    clearTimer('first');
+    clearTimer('followup');
+  }
+
+  function disconnectObserver(observerName) {
+    if (state.observers[observerName]) {
+      state.observers[observerName].disconnect();
+      state.observers[observerName] = null;
+    }
+  }
+
+  /* ====== DOM Element Getters ====== */
+  function getLauncherEl() {
+    return (
+      document.querySelector('.embeddedServiceLauncher') ||
+      document.querySelector('.embeddedServiceSidebarButton') ||
+      document.querySelector('[data-embedded-messaging-launcher]') ||
+      document.querySelector('#embedded-messaging .embeddedMessagingIcon') ||
+      document.querySelector('#embedded-messaging button') ||
+      document.querySelector('button[class*="Launcher"], div[class*="Launcher"]')
+    );
+  }
+
+  function getChatFrameEl() {
+    return (
+      document.querySelector('.embeddedMessagingFrame') ||
+      document.querySelector('iframe[data-embedded-messaging-iframe]') ||
+      document.querySelector('iframe[src*="embeddedmessaging"]') ||
+      document.querySelector('iframe[id*="embeddedMessaging"]')
+    );
+  }
+
+  function getFixedRootEl() {
+    const frame = getChatFrameEl();
+    if (!frame) return null;
+
+    let el = frame;
+    while (el && el !== document.body) {
+      const cs = getComputedStyle(el);
+      if (cs.position === 'fixed') return el;
+      el = el.parentElement;
+    }
+
+    return document.querySelector('#embedded-messaging') || null;
+  }
+
+  function getHeaderEl() {
+    const fromAttr = document.body?.getAttribute?.('data-esw-header');
+    const candidates = (fromAttr ? fromAttr.split(',') : [])
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    const defaults = [
+      'header.site-header', 'header.navbar', 'header#header', '#site-header',
+      'header.header', 'header', '.topbar', '.navbar'
+    ];
+
+    for (const sel of [...candidates, ...defaults]) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+
+    return null;
+  }
+
+  /* ====== Header Height Management ====== */
+  function updateHeaderHeightVar() {
+    const h = getHeaderEl()?.offsetHeight || 60;
+    document.documentElement.style.setProperty('--site-header-height', h + 'px');
+  }
+
+  /* ====== Style Locking ====== */
+  function lockLauncherStyle() {
+    const launcher = getLauncherEl();
+    if (!launcher) return;
+
+    const cs = getComputedStyle(document.documentElement);
+    const bottom = cs.getPropertyValue('--chat-launcher-bottom').trim() || '60px';
+    const right = cs.getPropertyValue('--chat-launcher-right').trim() || '30px';
+
+    launcher.style.position = 'fixed';
+    launcher.style.bottom = bottom;
+    launcher.style.right = right;
+    launcher.style.left = 'auto';
+    launcher.style.top = 'auto';
+    launcher.style.transform = 'none';
+    launcher.style.transition = 'none';
+    launcher.style.zIndex = '2147483647';
+
+    updateNudgePosition();
+  }
+
+  function lockFixedRootStyle() {
+    const root = getFixedRootEl();
+    if (!root) return;
+
+    if (!isMobile()) {
+      const cs = getComputedStyle(document.documentElement);
+      const gap = cs.getPropertyValue('--chat-frame-bottom-gap').trim() || '40px';
+      const rightGap = cs.getPropertyValue('--chat-frame-right-gap').trim() || '30px';
+
+      root.style.position = 'fixed';
+      root.style.top = 'auto';
+      root.style.left = 'auto';
+      root.style.right = rightGap;
+      root.style.bottom = gap;
+      root.style.inset = 'auto ' + rightGap + ' ' + gap + ' auto';
+      root.style.zIndex = '2147483645';
+    }
+  }
+
+  function applyStylesWithRetry() {
+    lockLauncherStyle();
+    lockFixedRootStyle();
+
+    CONFIG.RETRY_DELAYS.forEach(delay => {
+      setTimeout(() => {
+        lockLauncherStyle();
+        lockFixedRootStyle();
+      }, delay);
+    });
+  }
+
+  /* ====== Observer Setup ====== */
+  function observeDynamicElements() {
+    // Launcher observer
+    disconnectObserver('launcher');
+    const launcher = getLauncherEl();
+    if (launcher) {
+      state.observers.launcher = new MutationObserver(() => lockLauncherStyle());
+      state.observers.launcher.observe(launcher, {
+        attributes: true,
+        attributeFilter: ['style', 'class', 'aria-expanded', 'aria-pressed']
+      });
+
+      launcher.addEventListener('click', () => {
+        setTimeout(evaluateAndApplyOpenState, 350);
+      }, { capture: true, once: false });
+    }
+
+    // Fixed root observer
+    disconnectObserver('fixedRoot');
+    const root = getFixedRootEl();
+    if (root) {
+      state.observers.fixedRoot = new MutationObserver(() => lockFixedRootStyle());
+      state.observers.fixedRoot.observe(root, {
+        attributes: true,
+        attributeFilter: ['style', 'class']
+      });
+    }
+
+    // Body observer (only set up once)
+    if (!state.observers.body) {
+      state.observers.body = new MutationObserver(() => {
+        lockLauncherStyle();
+        lockFixedRootStyle();
+      });
+      state.observers.body.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+    }
+  }
+
+  function forceMobileFullscreen() {
+  if (!isMobile()) return;
+
+  const headerH = getHeaderEl()?.offsetHeight || 60;
+  const targets = [
+    document.querySelector('#embedded-messaging'),
+    getFixedRootEl(),
+    getChatFrameEl()
+  ].filter(Boolean);
+
+  targets.forEach(el => {
+    el.style.position = 'fixed';
+    el.style.inset = `${headerH}px 0 0 0`;
+    el.style.width = 'auto';
+    el.style.maxWidth = 'none';
+    el.style.height = `calc(100dvh - ${headerH}px)`;
+    el.style.maxHeight = `calc(100dvh - ${headerH}px)`;
+    el.style.margin = '0';
+  });
+}
+
+  function forceConversationFullWidth() {
+    if (!isMobile()) return;
+
+    const selectors = [
+      '.embeddedMessagingConversation',
+      '.embeddedMessagingWindow',
+      '.embeddedMessagingFrameContainer',
+      '.embeddedMessagingHeader',
+      '.embeddedMessagingConversationBody'
+    ];
+
+    selectors.forEach(sel => {
+      document.querySelectorAll(sel).forEach(el => {
+        el.style.width = 'auto';
+        el.style.maxWidth = 'none';
+        el.style.margin = '0';
+        el.style.left = '0';
+        el.style.right = '0';
+      });
+    });
+  }
+
+  /* ====== Nudge Management ====== */
+  function showNudge(message) {
+    console.log('[NUDGE] Attempting to show nudge:', message);
+
+    if (state.nudgeElement) {
+      console.log('[NUDGE] Nudge already visible, skipping');
+      return;
+    }
+
+    state.nudgeElement = document.createElement('div');
+    state.nudgeElement.className = 'chat-nudge';
+    state.nudgeElement.textContent = message;
+
+    const closeBtn = document.createElement('span');
+    closeBtn.className = 'close-btn';
+    closeBtn.textContent = '×';
+    closeBtn.onclick = function (e) {
+      console.log('[NUDGE] Closed manually');
+      e.stopPropagation();
+      removeNudge();
+    };
+    state.nudgeElement.appendChild(closeBtn);
+
+    state.nudgeElement.onclick = function () {
+      console.log('[NUDGE] Clicked - opening chat');
+      window.embeddedservice_bootstrap?.open?.();
+      removeNudge();
+    };
+
+    document.body.appendChild(state.nudgeElement);
+
+    if (!isMobile()) {
+      if (state.nudgeBottomPosition === null) {
+        const launcher = getLauncherEl();
+        if (launcher) {
+          const rect = launcher.getBoundingClientRect();
+          const bottom = Math.max(0, window.innerHeight - rect.top + 20);
+          const maxBottom = window.innerHeight - 50;
+          const minBottom = 20;
+          state.nudgeBottomPosition = Math.min(Math.max(bottom, minBottom), maxBottom);
+        }
+      }
+      state.nudgeElement.style.bottom = state.nudgeBottomPosition + 'px';
+    }
+
+    console.log('[NUDGE] Nudge displayed');
+  }
+
+  function removeNudge() {
+    if (state.nudgeElement) {
+      console.log('[NUDGE] Removing nudge');
+      state.nudgeElement.remove();
+      state.nudgeElement = null;
+    }
+  }
+
+  function updateNudgePosition() {
+    if (isMobile() || !state.nudgeElement) return;
+
+    const launcher = getLauncherEl();
+    if (launcher) {
+      if (state.nudgeBottomPosition === null) {
+        const rect = launcher.getBoundingClientRect();
+        const bottom = Math.max(0, window.innerHeight - rect.top + 20);
+        const maxBottom = window.innerHeight - 50;
+        const minBottom = 20;
+        state.nudgeBottomPosition = Math.min(Math.max(bottom, minBottom), maxBottom);
+      }
+      state.nudgeElement.style.bottom = state.nudgeBottomPosition + 'px';
+    }
+  }
+
+  /* ====== State Detection ====== */
+  function isOpenState() {
+    const frame = getChatFrameEl();
+    const root = getFixedRootEl();
+
+    if (!frame || !root) return false;
+
+    const fs = getComputedStyle(frame);
+    const fr = frame.getBoundingClientRect();
+    const rs = getComputedStyle(root);
+    const rr = root.getBoundingClientRect();
+
+    const frameVisible = (
+      fs.display !== 'none' &&
+      fs.visibility !== 'hidden' &&
+      fr.height > CONFIG.MIN_CHAT_HEIGHT &&
+      fr.width > CONFIG.MIN_CHAT_WIDTH
+    );
+
+    const rootLarge = (rr.height > CONFIG.MIN_CHAT_HEIGHT);
+
+    return frameVisible && rootLarge;
+  }
+
+  function evaluateAndApplyOpenState() {
+    const nowOpen = isOpenState();
+    const wasOpen = state.chatCurrentlyOpen;
+
+    // No state change
+    if (nowOpen === wasOpen) return;
+
+    // Transition: open → minimized
+    if (wasOpen && !nowOpen) {
+      console.log('[STATE] Chat minimized');
+      state.chatCurrentlyOpen = false;
+      document.body.classList.remove('esw-open');
+
+      // Only show follow-up nudge if chat was previously opened
+      if (state.chatEverOpened) {
+        clearTimer('followup');
+        const messages = getLocalizedMessages();
+        console.log('[FOLLOWUP] Scheduling follow-up nudge');
+        state.timers.followup = setTimeout(() => {
+          console.log('[FOLLOWUP] Showing follow-up nudge');
+          if (!isOpenState()) {
+            showNudge(messages.followup);
+          }
+        }, CONFIG.NUDGE_DELAY_MS);
+      }
+    }
+
+    // Transition: minimized → open
+    if (!wasOpen && nowOpen) {
+      console.log('[STATE] Chat opened');
+      state.chatCurrentlyOpen = true;
+      state.chatEverOpened = true;
+      document.body.classList.add('esw-open');
+      removeNudge();
+      clearAllTimers();
+    }
+  }
+
+  function startStatePolling() {
+    if (state.observers.statePoller) {
+      clearInterval(state.observers.statePoller);
+    }
+
+    state.chatCurrentlyOpen = isOpenState();
+    state.observers.statePoller = setInterval(
+      evaluateAndApplyOpenState,
+      CONFIG.STATE_POLL_INTERVAL_MS
+    );
+  }
+
+  /* ====== Event Handlers ====== */
+  function handleResize() {
+    updateHeaderHeightVar();
+    updateNudgePosition();
+
+    if (isMobile() && isOpenState()) {
+      // NON ricalcolare layout durante tastiera
+      return;
+    }
+
+    setTimeout(() => {
+      lockLauncherStyle();
+      lockFixedRootStyle();
+    }, 50);
+  }
+
+  /* ====== Salesforce Events ====== */
+  window.addEventListener('onEmbeddedMessagingReady', function () {
+    console.log('[ESW] Embedded Messaging Ready');
+    document.body.classList.add('chat-launcher-fixed');
+
+    updateHeaderHeightVar();
+    applyStylesWithRetry();
+    observeDynamicElements();
+    startStatePolling();
+
+    window.addEventListener('resize', handleResize);
+
+    // Schedule first nudge only if chat never opened
+    clearTimer('first');
+    const messages = getLocalizedMessages();
+    state.timers.first = setTimeout(() => {
+      console.log('[NUDGE] First timer expired');
+      if (!state.chatEverOpened && !isOpenState()) {
+        showNudge(messages.first);
+      }
+    }, CONFIG.NUDGE_DELAY_MS);
+    forceMobileFullscreen();
+    forceConversationFullWidth();
+  });
+
+  window.addEventListener('resize', function () {
+  // resize = tastiera → NON toccare layout
+});
+
+  window.addEventListener('onEmbeddedMessagingButtonClicked', function () {
+    console.log('[ESW] Button clicked');
+    setTimeout(evaluateAndApplyOpenState, 250);
+  });
+
+  window.addEventListener('onEmbeddedMessagingWindowOpened', function () {
+    console.log('[ESW] Window opened event');
+    state.chatCurrentlyOpen = true;
+    state.chatEverOpened = true;
+    document.body.classList.add('esw-open');
+    removeNudge();
+    clearAllTimers();
+
+    setTimeout(applyStylesWithRetry, 50);
+    forceMobileFullscreen();
+    forceConversationFullWidth();
+
+    setTimeout(forceMobileFullscreen, 100);
+    setTimeout(forceConversationFullWidth, 150);
+    setTimeout(forceConversationFullWidth, 300);
+  });
+
+  window.addEventListener('onEmbeddedMessagingWindowMinimized', function () {
+    console.log('[ESW] Window minimized event');
+    state.chatCurrentlyOpen = false;
+    document.body.classList.remove('esw-open');
+
+    setTimeout(applyStylesWithRetry, 50);
+
+    if (state.chatEverOpened) {
+      clearTimer('followup');
+      const messages = getLocalizedMessages();
+      console.log('[FOLLOWUP] Scheduling follow-up nudge (event)');
+      state.timers.followup = setTimeout(() => {
+        console.log('[FOLLOWUP] Showing follow-up nudge (event)');
+        if (!isOpenState()) {
+          showNudge(messages.followup);
+        }
+      }, CONFIG.NUDGE_DELAY_MS);
+    }
+  });
+
+  window.addEventListener('onEmbeddedMessagingWindowClosed', function () {
+    console.log('[ESW] Window closed event');
+    state.chatCurrentlyOpen = false;
+    document.body.classList.remove('esw-open');
+    setTimeout(applyStylesWithRetry, 50);
+  });
+})();
+</script>
+<!-- ======================== CUSTOM STYLES ======================== -->
+<style>
+:root {
+  /* Launcher (button) */
+  --chat-launcher-bottom: 60px;
+  --chat-launcher-right: 30px;
+
+  /* Nudge */
+  --chat-nudge-offset: 70px;
+
+  /* Header mobile */
+  --chat-header-height: 60px;
+  --site-header-height: 60px;
+
+  /* Desktop: lift chat box from bottom */
+  --chat-frame-bottom-gap: 40px;
+  --chat-frame-right-gap: 30px;
+}
+/* ======= DESKTOP ======= */
+@media (min-width: 1025px) {
+  .embeddedMessagingFrame {
+    border-radius: 16px !important;
+    overflow: hidden !important;
+    z-index: 2147483645 !important;
+  }
+
+  .embeddedMessagingHeader {
+    border-top-left-radius: 16px !important;
+    border-top-right-radius: 16px !important;
+  }
+
+  .embeddedMessagingConversation {
+    border-bottom-left-radius: 16px !important;
+    border-bottom-right-radius: 16px !important;
+  }
+}
+/* ======= LAUNCHER FIXED ======= */
+.chat-launcher-fixed .embeddedServiceLauncher,
+.chat-launcher-fixed .embeddedServiceSidebarButton,
+.chat-launcher-fixed #embedded-messaging .embeddedMessagingIcon,
+.chat-launcher-fixed button[class*="Launcher"],
+.chat-launcher-fixed div[class*="Launcher"] {
+  position: fixed !important;
+  bottom: var(--chat-launcher-bottom) !important;
+  right: var(--chat-launcher-right) !important;
+  left: auto !important;
+  top: auto !important;
+  transform: none !important;
+  z-index: 2147483647 !important;
+}
+/* ======= NUDGE ======= */
+.chat-nudge {
+  position: fixed;
+  bottom: calc(var(--chat-launcher-bottom) + var(--chat-nudge-offset));
+  right: var(--chat-launcher-right);
+  background: #ffffff;
+  color: #000;
+  padding: 10px 32px 10px 12px;
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+  font-size: 14px;
+  font-weight: 500;
+  z-index: 2147483646;
+  cursor: pointer;
+  animation: bounce 5s ease-out;
+}
+@keyframes bounce {
+  0% { transform: translateY(0); }
+  20% { transform: translateY(-6px); }
+  40% { transform: translateY(0); }
+  60% { transform: translateY(-3px); }
+  80% { transform: translateY(0); }
+  100% { transform: translateY(0); }
+}
+.chat-nudge .close-btn {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  font-weight: bold;
+  font-size: 14px;
+  color: #666;
+  cursor: pointer;
+  margin-left: 8px;
+}
+.chat-nudge .close-btn:hover {
+  color: #000;
+}
+/* ======= MOBILE FULLSCREEN ======= */
+@media (max-width: 1024px) {
+  body.esw-open {
+    overflow: hidden;
+  }
+
+  /* Salesforce root */
+  .esw-open #embedded-messaging {
+    position: fixed !important;
+    top: var(--site-header-height, 60px) !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+    height: calc(100dvh - var(--site-header-height, 60px)) !important;
+    margin: 0 !important;
+    inset: auto 0 0 0 !important;
+    z-index: 2147483646 !important;
+  }
+
+  /* Any fixed wrapper Salesforce adds */
+  .esw-open #embedded-messaging > div,
+  .esw-open #embedded-messaging [style*="fixed"] {
+    position: fixed !important;
+    left: 0 !important;
+    right: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+  }
+
+  /* Iframe */
+  .esw-open iframe[data-embedded-messaging-iframe],
+  .esw-open .embeddedMessagingFrame {
+    position: fixed !important;
+    top: var(--site-header-height, 60px) !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+    height: calc(100dvh - var(--site-header-height, 60px)) !important;
+    border-radius: 16px 16px 0 0 !important;
+  }
+}
+
+@media (max-width: 1024px) {
+
+  /* Container interno della conversazione */
+  .esw-open .embeddedMessagingConversation,
+  .esw-open .embeddedMessagingWindow,
+  .esw-open .embeddedMessagingFrameContainer {
+    width: auto !important;
+    max-width: none !important;
+    margin: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+  }
+
+  /* Header verde */
+  .esw-open .embeddedMessagingHeader {
+    width: auto !important;
+    max-width: none !important;
+    margin: 0 !important;
+  }
+
+  /* Area messaggi */
+  .esw-open .embeddedMessagingConversationBody,
+  .esw-open .embeddedMessagingConversationContainer {
+    width: auto !important;
+    max-width: none !important;
+  }
+}
+  @media (max-width: 1024px) {
+
+  .esw-open .embeddedMessagingConversation {
+    position: relative !important;
+    display: flex !important;
+    flex-direction: column !important;
+    height: 100% !important;
+  }
+
+  /* Header chat BLOCCATO */
+  .esw-open .embeddedMessagingHeader {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    z-index: 5 !important;
+  }
+
+  /* Corpo messaggi scorre sotto l’header */
+  .esw-open .embeddedMessagingConversationBody {
+    margin-top: var(--chat-header-height, 60px) !important;
+    flex: 1 1 auto !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Input resta in basso */
+  .esw-open .embeddedMessagingInputContainer {
+    flex-shrink: 0 !important;
+  }
+}
+
+  @media (max-width: 1024px) {
+  .esw-open .embeddedMessagingWindow,
+  .esw-open .embeddedMessagingFrameContainer {
+    transform: none !important;
+    top: 0 !important;
+  }
+}
+
+@media (max-width: 1024px) {
+  .esw-open * {
+    max-width: none !important;
+  }
+}
+
+@media (max-width: 1024px) {
+  body.esw-open {
+    position: fixed;
+    width: 100%;
+    overscroll-behavior: none;
+  }
+}
+
+/* 🔒 KILL overflow orizzontale mobile (Safari fix) */
+@media (max-width: 1024px) {
+  html, body {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-x: hidden !important;
+  }
+
+  body.esw-open {
+    overflow-x: hidden !important;
+  }
+}
+</style>
+<!-- ======================== LOAD SCRIPT ======================== -->
+<script type='text/javascript' src='https://leapmotor--dev01.sandbox.my.site.com/ESWLPMLeapmotor1760706603231/assets/js/bootstrap.min.js' onload='initEmbeddedMessaging()'></script>
   </body>
 </html>
